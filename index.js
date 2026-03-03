@@ -32,11 +32,14 @@ const SurveySchema = new mongoose.Schema({
 });
 const Survey = mongoose.model('Survey', SurveySchema);
 
+// --- GLOBAL VARIABLES ---
 let callTranscript = "";
+let isSaved = false; // This prevents saving duplicate entries
 
 // 1. Initial Greeting
 app.post('/voice', (req, res) => {
     callTranscript = ""; 
+    isSaved = false; // Reset the flag for a new call
     const twiml = `
         <Response>
             <Gather input="speech" action="/respond" timeout="10" speechTimeout="3">
@@ -46,12 +49,11 @@ app.post('/voice', (req, res) => {
     res.type('text/xml').send(twiml);
 });
 
-// 2. The Infinite Conversational Loop
+// 2. The Interactive Loop
 app.post('/respond', async (req, res) => {
     try {
         const userSpeech = req.body.SpeechResult;
         
-        // If silence, keep microphone open
         if (!userSpeech) {
             return res.type('text/xml').send(`
                 <Response>
@@ -64,30 +66,19 @@ app.post('/respond', async (req, res) => {
         callTranscript += `Citizen: ${userSpeech}\n`;
         console.log(`🗣️ You said: "${userSpeech}"`);
 
-        // --- THE HANG UP TRIGGER ---
-        // If the user says bye, break the loop and go save the data
         const speechLower = userSpeech.toLowerCase();
         if (speechLower.includes('bye') || speechLower.includes('goodbye') || speechLower.includes('that is all')) {
-            console.log("👋 User initiated hangup. Saving data...");
-            return res.redirect(307, '/finish');
+            console.log("👋 User said Goodbye. Triggering manual save...");
+            return res.type('text/xml').send('<Response><Redirect method="POST">/finish</Redirect></Response>');
         }
         
-        // --- DYNAMIC AI GENERATION WITH CONTEXT ---
-        // We pass the WHOLE transcript so the AI remembers the conversation
-        const prompt = `You are a conversational AI assistant for the local government. Have a natural, flowing conversation. Keep your responses short (1 to 2 sentences max) so it sounds like a real phone call. 
-        
-Here is the conversation history:
-${callTranscript}
-
-Respond naturally to the Citizen's last message.`;
+        const prompt = `You are a conversational AI assistant for the local government. Have a natural, flowing conversation. Keep your responses short (1 to 2 sentences max). Here is the conversation history:\n${callTranscript}\nRespond naturally to the Citizen's last message.`;
 
         const result = await model.generateContent(prompt);
         const aiReply = result.response.text();
         
         callTranscript += `AI: ${aiReply}\n`;
 
-        // --- THE LOOP ---
-        // Notice there is NO <Redirect> or <Hangup>. It just opens the mic again.
         const twiml = `
             <Response>
                 <Gather input="speech" action="/respond" timeout="10" speechTimeout="3">
@@ -99,7 +90,6 @@ Respond naturally to the Citizen's last message.`;
 
     } catch (error) {
         console.error("🚨 QUOTA OR API ERROR:", error.message);
-        // If quota fails, keep the loop alive with a hardcoded fallback
         const twiml = `
             <Response>
                 <Gather input="speech" action="/respond" timeout="10" speechTimeout="3">
@@ -110,31 +100,49 @@ Respond naturally to the Citizen's last message.`;
     }
 });
 
-// 3. Save to Database (Only triggers when user says "Goodbye")
+// 3. Save to Database (When user specifically says "Goodbye")
 app.post('/finish', async (req, res) => {
     try {
-        let summaryText = "Summary failed.";
-        try {
-            const result = await model.generateContent(`Summarize this in 10 words: ${callTranscript}`);
-            summaryText = result.response.text();
-        } catch (e) {
-            summaryText = "Citizen conversed. (AI Summary unavailable due to quota)";
+        if (!isSaved && callTranscript !== "") {
+            const newSurvey = new Survey({
+                phoneNumber: req.body.To || "Unknown", // Uses the citizen's number
+                transcript: callTranscript,
+                summary: "Citizen conversed. (AI Summary unavailable due to quota)",
+                location: "Agassaim" 
+            });
+            await newSurvey.save();
+            isSaved = true;
+            console.log(`✅ Data Saved on Goodbye!`);
         }
-
-        const newSurvey = new Survey({
-            phoneNumber: req.body.From || "Unknown",
-            transcript: callTranscript,
-            summary: summaryText,
-            location: "Agassaim" 
-        });
-
-        await newSurvey.save();
-        console.log(`✅ Data Saved!`);
-
         res.type('text/xml').send(`<Response><Say>Thank you. Your report has been saved. Goodbye.</Say><Hangup/></Response>`);
     } catch (error) {
         res.type('text/xml').send('<Response><Say>Goodbye.</Say><Hangup/></Response>');
     }
+});
+
+// 4. THE HANGUP CATCHER (When user abruptly hangs up the phone)
+app.post('/status', async (req, res) => {
+    const callStatus = req.body.CallStatus;
+    
+    // If the call drops, and we haven't saved the data yet, rescue it!
+    if (callStatus === 'completed' && !isSaved && callTranscript !== "") {
+        console.log("📞 Call dropped by user. Rescuing and saving data...");
+        try {
+            const newSurvey = new Survey({
+                phoneNumber: req.body.To || "Unknown",
+                transcript: callTranscript,
+                summary: "Citizen hung up mid-call. Partial data rescued.",
+                location: "Agassaim"
+            });
+            await newSurvey.save();
+            isSaved = true;
+            console.log(`✅ Rescued Data Saved to MongoDB!`);
+        } catch (err) {
+            console.error("🚨 Rescue Save Error:", err);
+        }
+    }
+    // Tell Twilio we received the status update
+    res.sendStatus(200); 
 });
 
 app.listen(3000, () => console.log(`🚀 AI Server live on port 3000`));

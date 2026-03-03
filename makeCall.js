@@ -8,13 +8,14 @@ const client = twilio(accountSid, authToken);
 async function initiateCall() {
     try {
         const call = await client.calls.create({
-            // ⚠️ CHANGE THIS to your currently running Ngrok URL
-            url: 'https://approvable-casen-sweetless.ngrok-free.dev/voice',
-
-            // ⚠️ CHANGE THIS to your Moto G86 number
-            to: '+919322761351',
-
-            from: process.env.TWILIO_PHONE_NUMBER
+            // ⚠️ KEEP YOUR CURRENT NGROK URL HERE
+            url: 'https://APPROVABLE-CASEN-SWEETLESS.ngrok-free.dev/voice', 
+            to: '+919322761351', // Your phone number
+            from: process.env.TWILIO_PHONE_NUMBER,
+            
+            // --- NEW: THE HANGUP DETECTOR ---
+            statusCallback: 'https://APPROVABLE-CASEN-SWEETLESS.ngrok-free.dev/status',
+            statusCallbackEvent: ['completed']
         });
 
         console.log(`✅ Success! Calling your phone now. Call ID: ${call.sid}`);
